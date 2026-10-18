@@ -1,5 +1,7 @@
 # pol-ler Sites
 
+Part of [dilroopg's FreshRSS extensions](https://github.com/dilroopg/freshrss-extensions) — see the hub for everything else.
+
 A FreshRSS extension that scrapes sites which publish **no RSS at all**, by
 driving a self-hosted [pol-ler](https://github.com/aldotroiano/pol-ler) instance
 from inside FreshRSS.
