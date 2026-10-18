@@ -32,6 +32,29 @@ Then **Extensions** → enable **pol-ler Sites**.
 No web-root shims and no standalone pages — this extension adds a settings page
 and a backend the rest of FreshRSS calls.
 
+## About the optional pol-ler fork
+
+The feed link pol-ler shows you is built from your browser's address bar. That
+works on its own, but a feed reader fetches the URL **server-side from inside its
+container**, where your browser's address may not resolve — so pasting that link
+into FreshRSS can give you a dead feed.
+
+There is a small fork of pol-ler that fixes this with one environment variable
+(`FEED_URL_BASE`), so the displayed link is already the internal
+`http://pol-ler:8088` a reader needs:
+
+- Fork: <https://github.com/dilroopg/pol-ler>
+
+**It is optional, and it is not maintained.** Two other ways to get the same
+result, both lower-maintenance:
+
+- Use upstream pol-ler and **correct the hostname once** when you add the feed to
+  FreshRSS — every feed works, you just fix the address.
+- Run pol-ler on an address **both** your browser and the container can reach
+  (your host's LAN IP). Then the browser-derived link is already right.
+
+Nothing in this extension requires the fork.
+
 ## 1. Start pol-ler
 
 ```bash

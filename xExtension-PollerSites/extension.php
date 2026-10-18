@@ -474,11 +474,20 @@ class PollerSitesExtension extends Minz_Extension
 
 		// Do not save a connection that does not work: the next cron tick would
 		// fail silently and the site would just look idle.
+		//
+		// The rollback deliberately restores only the CONNECTION fields. ui_url is
+		// a browser link for the "Open pol-ler" button — it touches no database —
+		// and rolling it back meant a wrong password silently threw away the
+		// address as well. It also made the link unsettable on a fresh install,
+		// which is exactly when you need it: before pol-ler exists, there is
+		// nothing to connect to, so every save failed.
 		$prevSettings = $cur;
 		$this->saveAll($this->sites(), $next, $this->bin());
 		if ($this->pg($next) === null) {
-			$this->saveAll($this->sites(), $prevSettings, $this->bin());
-			return ['ok' => false, 'message' => 'Could not connect with those settings — put back what was there.'];
+			$back = $prevSettings;
+			$back['ui_url'] = $next['ui_url'];
+			$this->saveAll($this->sites(), $back, $this->bin());
+			return ['ok' => false, 'message' => 'Could not connect with those settings — put back what was there. Your browser address was kept.'];
 		}
 		return ['ok' => true, 'message' => 'Connection settings saved and tested.'];
 	}
