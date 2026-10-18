@@ -1,0 +1,8 @@
+# Per-install data — never committed
+names.js
+names.js.bak*
+names.js.tmp*
+static/thumbs/
+piccache/
+*.token
+.DS_Store

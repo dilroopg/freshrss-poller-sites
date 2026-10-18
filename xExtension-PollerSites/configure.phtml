@@ -1,0 +1,320 @@
+<?php
+/** @var PollerSitesExtension $this */
+$sites = $this->sites();
+$bin = $this->bin();
+$conf = $this->settings();
+$csrf = FreshRSS_Auth::csrfToken();
+$url = _url('extension', 'configure', 'e', urlencode($this->getName()));
+?>
+<div class="form-group">
+	<p class="help">
+		<strong>How this works.</strong> In pol-ler, build one feed by hand for one person on a
+		site (any site you want to follow) and <em>paste that feed's URL here</em> — the whole
+		<code>http://pol-ler:8088/feed/65</code>. Then type the site's domain. Every feed you add from that
+		domain afterwards gets its own pol-ler feed cloned exactly from the template, and both are filed into
+		that site's categories.
+	</p>
+	<p class="help">
+		Deleting a site below only stops this extension managing it — this page never deletes a pol-ler feed,
+		subscription or category. The site keeps working on its native feed.
+	</p>
+	<p class="help">
+		<strong>Every</strong> is a floor, not a schedule: this runs during FreshRSS's own refresh, so a site
+		set to 1 min runs as often as FreshRSS refreshes. <strong>Watch</strong> fetches one of the site's
+		twins each run to confirm the template still renders — off by default, one extra request per run when on.
+	</p>
+</div>
+
+<form method="post" action="<?= $url ?>" id="poller-sites-form">
+	<input type="hidden" name="_csrf" value="<?= $csrf ?>" />
+	<input type="hidden" name="sites_json" id="sites_json" value="" />
+
+	<div class="table-wrapper">
+	<table class="table" id="sites-table">
+		<thead>
+			<tr>
+				<th>Site domain</th>
+				<th title="Paste the pol-ler feed you made for this site">Template feed</th>
+				<th>Mode</th>
+				<th title="minutes between runs — FreshRSS's own refresh sets the real floor">Every</th>
+				<th title="uncheck to pause this site without deleting it">On</th>
+				<th title="fetch one twin per run to confirm the template still renders">Watch</th>
+				<th>Last run</th>
+				<th></th>
+			</tr>
+		</thead>
+		<tbody>
+		<?php if ($sites === []) { ?>
+			<tr class="empty"><td colspan="8">No sites yet — add one below.</td></tr>
+		<?php } ?>
+		<?php foreach ($sites as $i => $s) {
+			$valid = $s['valid'] ?? null;
+			$ago = time() - (int)($s['last_run'] ?? 0);
+			$when = empty($s['last_run']) ? 'never' : ($ago < 3600 ? floor($ago / 60) . ' min ago' : gmdate('Y-m-d H:i', (int)$s['last_run']) . ' UTC');
+			$detail = trim((string)($s['last_summary'] ?? ''));
+			if ($valid === false) { $detail = $s['valid_msg'] . ' | ' . $detail; }
+			?>
+			<tr data-i="<?= $i ?>">
+				<td><input type="text" class="site-domain" value="<?= htmlspecialchars((string)$s['domain'], ENT_QUOTES) ?>" /></td>
+				<td><input type="text" class="site-template" style="width:11em"
+					placeholder="paste http://pol-ler:8088/feed/65"
+					inputmode="url" autocomplete="off" spellcheck="false"
+					value="<?= htmlspecialchars($this->templateDisplay((int)$s['template']), ENT_QUOTES) ?>" /></td>
+				<td>
+					<select class="site-mode">
+						<option value="both"<?= ($s['mode'] ?? 'both') === 'both' ? ' selected' : '' ?>>both categories</option>
+						<option value="poller"<?= ($s['mode'] ?? '') === 'poller' ? ' selected' : '' ?>>pol-ler only</option>
+					</select>
+				</td>
+				<td><input type="number" min="1" max="1440" class="site-interval" style="width:5em"
+					value="<?= (int)($s['interval'] ?? 15) ?>" /> min</td>
+				<td><input type="checkbox" class="site-enabled" <?= empty($s['disabled']) ? 'checked' : '' ?> /></td>
+				<td><input type="checkbox" class="site-watch" <?= !empty($s['watch']) ? 'checked' : '' ?> /></td>
+				<td class="site-state" title="<?= htmlspecialchars($detail, ENT_QUOTES) ?>">
+					<?= htmlspecialchars($when, ENT_QUOTES) ?>
+					<?php if ($valid === false) { ?><strong>· invalid</strong><?php } ?>
+					<?php if (!empty($s['disabled'])) { ?><em>· paused</em><?php } ?>
+				</td>
+				<td>
+					<button type="button" class="btn site-del" title="Stop managing this site — recoverable for 10 days">Delete</button>
+					<button type="submit" class="btn site-run" data-key="<?= htmlspecialchars($s['domain'] . '#' . $s['template'], ENT_QUOTES) ?>" title="Run this site now instead of waiting">Run now</button>
+				</td>
+			</tr>
+		<?php } ?>
+		</tbody>
+	</table>
+	</div>
+
+	<p>
+		<button class="btn" type="button" id="site-add">Add a site</button>
+		<button class="btn btn-important" type="submit">Save</button>
+	</p>
+
+	<?php // Keep the settings page about settings. The install prerequisites live in
+	      // README.md (next to this file), linked here in one line, so the form is not
+	      // buried under documentation nobody reads twice. ?>
+	<p class="help">
+		<strong>Needs pol-ler running on a shared Docker network.</strong>
+		Not set up yet? <a href="<?= htmlspecialchars($this->getFileUrl('README.md', 'misc'), ENT_QUOTES) ?>" target="_blank" rel="noreferrer">Read the setup steps</a>
+		— three commands, one time. If the box below does not load in a browser, the network is
+		still the problem, not these fields.
+	</p>
+
+	<?php
+	// Layout of pol-ler feeds. Saving the choice does NOT move anything: the
+	// migrate button below does, with a preview first, in either direction.
+	$layout = $conf['twin_layout'] ?? 'split';
+	$singleName = $conf['twin_single_name'] ?? 'Scraped feeds (pol-ler)';
+	$csrf2 = FreshRSS_Auth::csrfToken();
+	?>
+	<fieldset class="form-group">
+		<legend>Where pol-ler feeds go</legend>
+		<form method="post" action="<?= $url ?>">
+			<input type="hidden" name="_csrf" value="<?= $csrf2 ?>" />
+			<input type="hidden" name="act" value="twinlayout" />
+			<p class="help">
+				<strong>One per site</strong> gives each site its own
+				<code>&lt;Site&gt; (pol-ler)</code> category. <strong>One shared category</strong>
+				puts every scraped feed in a single category, with as many feeds per person as they
+				appear on. Changing this only records the choice — the feeds move when you press
+				migrate, and moving back is a button too.
+			</p>
+			<label>
+				<input type="radio" name="twin_layout" value="split" <?= $layout !== 'single' ? 'checked' : '' ?> />
+				One category per site
+			</label>
+			<label>
+				<input type="radio" name="twin_layout" value="single" <?= $layout === 'single' ? 'checked' : '' ?> />
+				One shared category called
+				<input type="text" name="twin_single_name" value="<?= htmlspecialchars($singleName, ENT_QUOTES) ?>"
+					style="width:15em" placeholder="Scraped feeds (pol-ler)" />
+			</label>
+			<p><button class="btn" type="submit">Save layout choice</button></p>
+		</form>
+
+		<form method="post" action="<?= $url ?>">
+			<input type="hidden" name="_csrf" value="<?= $csrf2 ?>" />
+			<input type="hidden" name="act" value="twinmigrate" />
+			<input type="hidden" name="apply" value="0" />
+			<p><button class="btn" type="submit">Preview the move</button>
+				<span class="help">Counts what would change. Moves nothing.</span></p>
+		</form>
+
+		<form method="post" action="<?= $url ?>">
+			<input type="hidden" name="_csrf" value="<?= $csrf2 ?>" />
+			<input type="hidden" name="act" value="twinmigrate" />
+			<input type="hidden" name="apply" value="1" />
+			<p><button class="btn btn-important" type="submit">Move the feeds now</button>
+				<span class="help">Reversible: the other layout's button moves them back. No feed,
+				subscription or category is ever deleted.</span></p>
+		</form>
+	</fieldset>
+
+	<?php
+	// Health, computed once and shown as three separate lines. A single
+	// "connected / not connected" flag hid which layer broke, and the first
+	// failure a new install hits — the shared Docker network — cannot be fixed
+	// by any setting on this page.
+	$health = $this->health();
+	$labels = [
+		'http' => ['pol-ler web server', 'Is pol-ler running and reachable by name'],
+		'db'   => ['pol-ler database', 'Are the credentials below correct'],
+		'feed' => ['template feed', 'Does a configured template return items'],
+	];
+	?>
+	<fieldset class="form-group">
+		<legend>Is pol-ler working?</legend>
+		<p class="help">Checked just now, layer by layer. Each line fails for a different reason, so fix them top to bottom.</p>
+		<div class="table-wrapper">
+		<table class="table">
+			<thead><tr><th>Layer</th><th>State</th><th>Detail</th></tr></thead>
+			<tbody>
+			<?php foreach ($labels as $key => $meta) {
+				$row = $health[$key] ?? ['ok' => false, 'detail' => 'not checked']; ?>
+				<tr>
+					<td>
+						<strong><?= htmlspecialchars($meta[0], ENT_QUOTES) ?></strong><br />
+						<span class="help"><?= htmlspecialchars($meta[1], ENT_QUOTES) ?></span>
+					</td>
+					<td>
+						<?php if ($row['ok']) { ?>
+							<span style="color:#3a7d44;font-weight:600">&#10003; working</span>
+						<?php } else { ?>
+							<span style="color:#b03030;font-weight:600">&#10007; failed</span>
+						<?php } ?>
+					</td>
+					<td><code style="white-space:pre-wrap"><?= htmlspecialchars($row['detail'], ENT_QUOTES) ?></code></td>
+				</tr>
+			<?php } ?>
+			</tbody>
+		</table>
+		</div>
+
+		<?php if (!$health['http']['ok'] || !$health['db']['ok']) { ?>
+		<div style="margin-top:1em;padding:.9em 1em;border-left:3px solid #b03030;background:rgba(176,48,48,.06)">
+			<strong>pol-ler is not reachable, so the features below cannot work yet.</strong>
+			<p class="help" style="margin:.5em 0 0">
+				This extension does not install pol-ler for you. It is separate software with
+				its own repository, and it has to share a Docker network with FreshRSS before
+				either container can find the other by name. The compose file shipped in this
+				extension does that wiring:
+			</p>
+			<pre style="margin:.6em 0;padding:.6em;background:rgba(0,0,0,.05);overflow-x:auto"><code>git clone https://github.com/aldotroiano/pol-ler
+cd pol-ler
+docker compose -f /path/to/xExtension-PollerSites/docker-compose.pol-ler.yml up -d
+
+# then confirm FreshRSS can resolve it:
+docker exec freshrss getent hosts pol-ler</code></pre>
+			<p class="help" style="margin:.5em 0 0">
+				If the last command prints nothing, the two containers are not on a shared
+				network — that is the usual cause, and no field on this page will fix it.
+				Full steps: <code>xExtension-PollerSites/README.md</code>.
+			</p>
+		</div>
+		<?php } ?>
+	</fieldset>
+
+	<fieldset class="form-group">
+		<legend>Step 1 — make a template in pol-ler</legend>
+		<p class="help">
+			A <strong>template</strong> is one feed you build by hand in pol-ler for a single
+			person on a site. It teaches this extension how that site is scraped; everything
+			after it is a clone, so you never write the scraping rules twice.
+		</p>
+		<ol class="help" style="margin:.2em 0 .8em 1.2em">
+			<li>Open pol-ler.</li>
+			<li>Build a feed for one real person on the site you care about.</li>
+			<li>Check it returns items — a template that scrapes nothing produces nothing.</li>
+			<li>Note its number: the <code>/feed/&lt;N&gt;</code> part of its address.</li>
+			<li>Add the site below using that number.</li>
+		</ol>
+		<p>
+			<?php $ui = trim((string)($conf['ui_url'] ?? '')); ?>
+			<?php if ($ui !== '') { ?>
+				<a class="btn btn-important" href="<?= htmlspecialchars($ui, ENT_QUOTES) ?>" target="_blank" rel="noreferrer">Open pol-ler to make a template &#8599;</a>
+			<?php } else { ?>
+				<span class="help"><strong>Set "Browser address" below to get an Open pol-ler link here.</strong></span>
+			<?php } ?>
+		</p>
+	</fieldset>
+
+	<fieldset class="form-group">
+		<legend>pol-ler connection</legend>
+		<div class="form-group">
+			<label>Web address <input type="text" name="http_url" value="<?= htmlspecialchars($conf['http_url'], ENT_QUOTES) ?>" /></label>
+			<p class="help">Internal address the FreshRSS container uses, normally <code>http://pol-ler:8088</code>. Changing it does not move existing subscriptions.</p>
+		</div>
+		<div class="form-group">
+			<label>Browser address (optional) <input type="text" name="ui_url" value="<?= htmlspecialchars((string)($conf['ui_url'] ?? ''), ENT_QUOTES) ?>" placeholder="http://192.168.1.10:8088" /></label>
+			<p class="help">How <em>you</em> reach pol-ler in a browser. Only used to build the "Open pol-ler" link above — leave blank if you do not want one.</p>
+		</div>
+		<div class="form-group">
+			<label>DB host <input type="text" name="pg_host" value="<?= htmlspecialchars($conf['pg_host'], ENT_QUOTES) ?>" /></label>
+			<label>Port <input type="number" name="pg_port" value="<?= (int)$conf['pg_port'] ?>" style="width:6em" /></label>
+			<label>DB <input type="text" name="pg_db" value="<?= htmlspecialchars($conf['pg_db'], ENT_QUOTES) ?>" /></label>
+			<label>User <input type="text" name="pg_user" value="<?= htmlspecialchars($conf['pg_user'], ENT_QUOTES) ?>" /></label>
+			<label>Password <input type="password" name="pg_pass" value="<?= htmlspecialchars($conf['pg_pass'], ENT_QUOTES) ?>" /></label>
+		</div>
+	</fieldset>
+</form>
+
+<?php // A "point existing twins at the Web address" button used to live here.
+      // It only mattered if pol-ler changed host. Removed with its rewrite logic. ?>
+
+<?php if ($bin !== []) { ?>
+<h2>Deleted sites</h2>
+<p class="help">Recoverable for 10 days. Nothing was deleted from pol-ler or FreshRSS — only this extension's profile.</p>
+<div class="table-wrapper">
+<table class="table">
+	<thead><tr><th>Site</th><th>Template</th><th>Deleted</th><th></th></tr></thead>
+	<tbody>
+	<?php foreach ($bin as $e) {
+		$s = $e['site'];
+		$key = $s['domain'] . '#' . $s['template']; ?>
+		<tr>
+			<td><?= htmlspecialchars((string)$s['domain'], ENT_QUOTES) ?></td>
+			<td><?= (int)$s['template'] ?></td>
+			<td><?= gmdate('Y-m-d H:i', (int)$e['deleted']) ?> UTC</td>
+			<td>
+				<form method="post" action="<?= $url ?>">
+					<input type="hidden" name="_csrf" value="<?= $csrf ?>" />
+					<input type="hidden" name="act" value="restore" />
+					<input type="hidden" name="key" value="<?= htmlspecialchars($key, ENT_QUOTES) ?>" />
+					<button class="btn" type="submit">Recover</button>
+				</form>
+			</td>
+		</tr>
+	<?php } ?>
+	</tbody>
+</table>
+</div>
+<form method="post" action="<?= $url ?>">
+	<input type="hidden" name="_csrf" value="<?= $csrf ?>" />
+	<input type="hidden" name="act" value="purge" />
+	<button class="btn" type="submit">Empty the deleted list now</button>
+</form>
+<?php } ?>
+
+<template id="site-row">
+	<tr data-i="__I__">
+		<td><input type="text" class="site-domain" placeholder="example.com" /></td>
+		<td><input type="text" class="site-template" style="width:11em"
+			placeholder="paste http://pol-ler:8088/feed/65"
+			inputmode="url" autocomplete="off" spellcheck="false" /></td>
+		<td>
+			<select class="site-mode">
+				<option value="both" selected>both categories</option>
+				<option value="poller">pol-ler only</option>
+			</select>
+		</td>
+		<td><input type="number" min="1" max="1440" class="site-interval" style="width:5em" value="15" /> min</td>
+		<td><input type="checkbox" class="site-enabled" checked /></td>
+		<td><input type="checkbox" class="site-watch" /></td>
+		<td class="site-state">new — save to validate</td>
+		<td><button type="button" class="btn site-del">Delete</button></td>
+	</tr>
+</template>
+
+<!-- All behaviour lives in static/config.js, registered with appendScript in
+     extension.php. Inline script here does NOT execute when FreshRSS injects
+     this view into the AJAX slider. -->

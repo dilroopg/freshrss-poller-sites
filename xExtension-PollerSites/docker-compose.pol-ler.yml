@@ -1,0 +1,88 @@
+# pol-ler, wired to FreshRSS.
+#
+# Based on upstream github.com/aldotroiano/pol-ler (docker-compose.yaml, MIT).
+# Two changes, both required for the extension to reach pol-ler:
+#
+#   1. the pol-ler service also joins the FreshRSS network, so the FreshRSS
+#      container can resolve the name "pol-ler" (and "db-pol-ler") directly.
+#      Without this, pol-ler lives on pol-ler-network alone and every request
+#      from the extension fails with "could not resolve host".
+#   2. the database password comes from the environment instead of the
+#      upstream literal, so each install gets its own.
+#
+# Start it from the directory you cloned pol-ler into:
+#   docker compose -f /path/to/docker-compose.pol-ler.yml up -d
+#
+# Check it:
+#   docker compose -f /path/to/docker-compose.pol-ler.yml ps
+#   curl -fsS http://localhost:8088/health
+#
+# Set FRESHRSS_NETWORK to whatever your FreshRSS container is actually on:
+#   docker inspect freshrss --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}'
+# Docker Compose names it "<project>_default" (usually "freshrss_default").
+
+services:
+  pol-ler:
+    platform: linux/amd64
+    build:
+      context: .
+    environment:
+      DB_NAME: 'politepol'
+      DB_USER: 'poluser'
+      DB_PASSWORD: '${POL_LER_DB_PASSWORD:-polpassword}'
+      DB_HOST: 'db-pol-ler'
+      DB_PORT: '5432'
+      WEB_PORT: '8088'
+      TIME_ZONE: '${TZ:-UTC}'
+      CSRF_TRUSTED_ORIGINS: 'http://localhost:8088,http://127.0.0.1:8088,http://pol-ler:8088'
+    image: pol-ler:latest
+    depends_on:
+      db-pol-ler:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8088/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    command: ["./wait-for-it.sh", "db-pol-ler", "/bin/bash", "./frontend/start.sh"]
+    container_name: pol-ler
+    restart: unless-stopped
+    networks:
+      - pol-ler-network
+      - freshrss
+    ports:
+      - '8088:8088'
+
+  db-pol-ler:
+    image: postgres:16-alpine
+    platform: linux/amd64
+    container_name: db-pol-ler
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: 'politepol'
+      POSTGRES_USER: 'poluser'
+      POSTGRES_PASSWORD: '${POL_LER_DB_PASSWORD:-polpassword}'
+    networks:
+      - pol-ler-network
+      - freshrss
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U poluser -d politepol"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+
+networks:
+  pol-ler-network:
+    driver: 'bridge'
+  # The FreshRSS network, referenced as external so this file never creates or
+  # destroys it. If your FreshRSS is not on "freshrss_default", change the name
+  # here (it must match exactly what docker inspect reported).
+  freshrss:
+    external: true
+    name: '${FRESHRSS_NETWORK:-freshrss_default}'
