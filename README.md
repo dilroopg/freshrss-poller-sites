@@ -1,6 +1,6 @@
 # pol-ler Sites
 
-Part of [dilroopg's FreshRSS extensions](https://github.com/dilroopg/freshrss-extensions) — see the hub for everything else.
+Part of [hardlysleeping's FreshRSS extensions](https://github.com/hardlysleeping/freshrss-extensions) — see the hub for everything else.
 
 A FreshRSS extension that scrapes sites which publish **no RSS at all**, by
 driving a self-hosted [pol-ler](https://github.com/aldotroiano/pol-ler) instance
@@ -46,7 +46,7 @@ required, and nothing here calls one.
 
 ```bash
 cd /path/to/FreshRSS/extensions
-git clone https://github.com/dilroopg/freshrss-poller-sites xExtension-PollerSites
+git clone https://github.com/hardlysleeping/freshrss-poller-sites xExtension-PollerSites
 ```
 
 Then **Extensions → enable pol-ler Sites**. That is the whole install — this
@@ -68,7 +68,7 @@ it by name. See the setup below.
 
 ```bash
 cd /path/to/FreshRSS/extensions
-git clone https://github.com/dilroopg/freshrss-poller-sites _tmp
+git clone https://github.com/hardlysleeping/freshrss-poller-sites _tmp
 mv _tmp/xExtension-PollerSites . && rm -rf _tmp
 ```
 
@@ -88,7 +88,7 @@ There is a small fork of pol-ler that fixes this with one environment variable
 (`FEED_URL_BASE`), so the displayed link is already the internal
 `http://pol-ler:8088` a reader needs:
 
-- Fork: <https://github.com/dilroopg/pol-ler>
+- Fork: <https://github.com/hardlysleeping/pol-ler>
 
 **It is optional, and it is not maintained.** Two other ways to get the same
 result, both lower-maintenance:
