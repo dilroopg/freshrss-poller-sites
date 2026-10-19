@@ -7,16 +7,19 @@ driving a self-hosted [pol-ler](https://github.com/aldotroiano/pol-ler) instance
 from inside FreshRSS.
 
 Some sites you want to follow have no feed. pol-ler builds one by scraping the
-page; this extension is the bridge — so you add a person or a page **by name**
-instead of building and maintaining a separate scraper for every single one.
+page; this extension is the bridge — so you add a section of that site **by
+address** instead of building and maintaining a separate scraper for every
+single one.
 
 ```
-   you: "news.example/entertainment"
+   you: news.example/entertainment
          │
          ▼
    pol-ler Sites ── clones your template ──▶ pol-ler ── scrapes ──▶ RSS feed
          │                                                              │
          └──────────────── subscribes in FreshRSS ◀────────────────────┘
+
+   (your template was built once, for news.example/world)
 ```
 
 **Standalone.** Nothing else has to be installed, no other extension is
@@ -28,9 +31,9 @@ required, and nothing here calls one.
 ## What it does
 
 - **Per-site profiles.** Teach it a site once — a URL pattern and one template
-  feed — then add any name on that site with a single click.
-- **Twin cloning.** Each person's feed is created by cloning your template's
-  scraping rules, so you never write XPath by hand more than once.
+  feed — then add any path on that site with a single click.
+- **Twin cloning.** Each new feed is created by cloning your template's scraping
+  rules, so you never write XPath by hand more than once.
 - **Populate.** Walks your existing FreshRSS subscriptions and builds the
   matching pol-ler feeds.
 - **Honest checks.** It verifies a page exists before building a scraper for it,
@@ -182,20 +185,23 @@ database, user, password, and the web address. Save.
 If your pol-ler Postgres password is not `polpassword`, set it here — a blank
 password field means "use pol-ler's compose default".
 
-## 5. Build one template by hand, then add names
+## 5. Build one template by hand, then add paths
 
 The extension does not invent scraping rules. **You make the first feed in
 pol-ler yourself**, and that feed becomes the template everything else is cloned
 from. The order is always:
 
-1. **Open pol-ler** and build a feed for one person on the site you care about
-   (their category, tag or profile page). You choose the XPath fields.
+1. **Open pol-ler** and build a feed for one page on the site you care about
+   (a section, tag or listing page). You choose the XPath fields — for example,
+   build a feed for `news.example/world`.
 2. **Check it returns items.** A template that scrapes nothing produces nothing,
-   however many names you add afterwards.
+   however many paths you add afterwards.
 3. **Note its number** — the `/feed/<N>` part of the address.
 4. **Add the site here** using that number. The domain is derived; you do not
    type it.
-5. **Add names.** Each one clones the template.
+5. **Add paths.** Each one clones the template. From a `news.example/world`
+   template you can add `news.example/business` or `news.example/sport` and get
+   a working scraped feed for each, with no extra XPath work.
 
 ### The "Open pol-ler" link
 
@@ -217,17 +223,18 @@ from the template.
 
 - FreshRSS feeds (subscriptions) — the twins it creates
 - FreshRSS categories — `<Site> (pol-ler)` and `<Site> (direct)`
-- pol-ler's own database — one feed row plus its field rows per person
+- pol-ler's own database — one feed row plus its field rows per added path
 
 It never deletes a pol-ler feed, subscription or category except through its own
 Remove / Delete buttons.
 
 ## Sites with no RSS
 
-Some sites publish no per-person feed at all (their feed URL is an HTML page). For
-those, the **Make on fail** toggle builds the feed from the site's pol-ler template
-instead of dropping the person. It is off by default and only ever applies to sites
-that are registered here *and* whose direct feed genuinely returns no items.
+Some sites publish no feed for a given path at all (the feed URL is an HTML page).
+For those, the **Make on fail** toggle builds the feed from the site's pol-ler
+template instead of dropping that path. It is off by default and only ever
+applies to sites that are registered here *and* whose direct feed genuinely
+returns no items.
 
 > ### ⚠️ `docker ps` will show pol-ler as "unhealthy" — this is expected, and it is fine
 >
@@ -250,7 +257,7 @@ that are registered here *and* whose direct feed genuinely returns no items.
 | Settings look right, nothing happens | Not on the shared network — check step 3 |
 | `no such host` in logs | Same as above |
 | Site saves but `Populate` finds 0 | The site has no direct feeds to mirror (expected for no-RSS sites) |
-| Person added, no feed appears | Their slug differs on that site — check the site's own URL for them |
+| Path added, no feed appears | Its slug differs on that site — check the site's own URL and copy the exact path |
 | ⚠️ `docker ps` says pol-ler is "unhealthy" | **Expected.** Its healthcheck needs `curl`, which is not in the image. Ignore it if `/health` returns `OK` |
 
 ## Development setup
