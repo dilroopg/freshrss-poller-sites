@@ -315,3 +315,7 @@ docker compose -f docker-compose.pol-ler.yml logs -f pol-ler
 ## Licence
 
 MIT.
+
+## Support
+
+[![Donate with PayPal](https://www.paypalobjects.com/en_US/i/btn/btn_donateCC_LG.gif)](https://www.paypal.com/donate/?hosted_button_id=RNT5W4XNC64EY)
