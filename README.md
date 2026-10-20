@@ -41,6 +41,18 @@ required, and nothing here calls one.
   template feed — because those three fail for completely different reasons.
 - **One category or many.** File every scraped feed under one shared category,
   or give each site its own. Reversible either way.
+- **Reversible moves.** Every layout change is journalled before it touches a
+  row, so **Undo the last move** puts every feed back exactly where it was —
+  including categories it had to delete on the way, which are recreated.
+- **Hidden state follows the group.** A feed filed into a hidden category is
+  hidden; filed into a visible one, it is visible. Enforced on every run, not
+  only when a feed moves, so a feed added later by the cron still inherits it.
+- **Hand-filed categories are left alone.** Only the shared twin category and
+  the `<Site> (pol-ler)` folders are managed. Anything else — uncategorised
+  feeds, per-person folders, your own topic folders — is never moved into.
+- **No duplicate subscriptions.** Feeds are matched on their pol-ler id, and a
+  URL check immediately before subscribing means a re-run adopts the existing
+  row instead of adding a second one.
 
 ## Install
 
@@ -226,7 +238,38 @@ from the template.
 - pol-ler's own database — one feed row plus its field rows per added path
 
 It never deletes a pol-ler feed, subscription or category except through its own
-Remove / Delete buttons.
+Remove / Delete buttons, or through a layout move — and a move is always
+recorded in the undo journal first.
+
+## Layout moves and undo
+
+The twin layout is chosen on the extension's own settings page, or from the
+**Cross site counterpart** page if you have that extension installed (it gathers
+settings from other extensions in one place, and calls these same methods).
+
+| Control | What it does |
+|---|---|
+| **Layout** | *One category for all people* — every twin in a single shared category. *One per site* — twins filed into `<Site> (pol-ler)`. |
+| **Preview** | Reports how many feeds would move, and where. Changes nothing. |
+| **Move now** | Applies the layout. Writes the undo journal first. |
+| **Undo last move** | Puts every feed back where it was, recreates any category the move deleted, and restores the previous layout. |
+
+The journal lives in `data/users/<user>/extensions/CrossSite/state.sqlite`
+(`moves`, `feed_before`, `cat_before`) and is checked by the stack backup script,
+so an undo survives a restore from backup.
+
+Moving into a shared category deletes the person folders it empties — an undo
+recreates them. Empty `<Site> (pol-ler)` folders are kept, because the split
+direction files into them by name.
+
+## Protected categories
+
+A category is only ever moved into or out of when it is the shared twin category
+or one of the `<Site> (pol-ler)` folders. Everything else is treated as
+hand-filed and is never touched: uncategorised feeds, `<Site> (direct)` folders,
+and any topic or person folder you made yourself. New categories are protected
+automatically for the same reason — the rule lists what is managed, not what is
+exempt.
 
 ## Sites with no RSS
 

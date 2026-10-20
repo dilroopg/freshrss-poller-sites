@@ -588,95 +588,371 @@ class PollerSitesExtension extends Minz_Extension
 	}
 
 	/**
-	 * Migrate every managed twin to the current layout. Reversible in both
-	 * directions, and never deletes a feed or a category.
+	 * Replaces migrateTwinLayout() in xExtension-PollerSites/extension.php.
 	 *
-	 * "Managed twin" means a feed whose URL points at pol-ler AND whose current
-	 * category is one of this extension's pol-ler categories. Feeds people filed
-	 * elsewhere by hand (Uncategorized, or their own folders) are left alone: moving
-	 * them would silently re-file things the extension never put there.
-	 *
-	 * @return array{ok:bool,message:string,moved:int,skipped:int,detail:string}
+	 * Changes vs the old method:
+	 *  1. Twin rule no longer requires a "(pol-ler)" category name. Any pol-ler
+	 *     feed counts as managed EXCEPT ones in Uncategorized (1) or in a
+	 *     "<Site> (direct)" folder — both are left alone by design.
+	 *  2. Hidden state: when applying, the shared category's own hidden state is
+	 *     applied to every managed category, so person folders follow the group.
+	 *  3. Journal: every apply records where each feed came from, in
+	 *     CrossSite/state.sqlite, so the move can be undone in one click.
 	 */
-	public function migrateTwinLayout(bool $apply = false): array
+
+	/** Absolute-path-agnostic helper: where the journal lives. */
+	private function pollerJournalPath(): string {
+    $user = defined('ADD_USER') ? ADD_USER : '';
+    if ($user === '') {
+        foreach ((array)@scandir(DATA_PATH . '/users') ?: [] as $n) {
+            if ($n === '.' || $n === '..' || $n === '_') { continue; }
+            if (is_dir(DATA_PATH . '/users/' . $n)) { $user = $n; break; }
+        }
+    }
+    if ($user === '') { return ''; }
+    $dir = DATA_PATH . '/users/' . $user . '/extensions/CrossSite';
+    if (!is_dir($dir)) { @mkdir($dir, 0775, true); }
+    return $dir . '/state.sqlite';
+}
+
+	/** Open (and create) the move journal. Returns null if it cannot be opened. */
+	private function pollerJournal(): ?PDO {
+    $file = $this->pollerJournalPath();
+    if ($file === '') { return null; }
+    try {
+        $db = new PDO('sqlite:' . $file, null, null, [
+            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+            PDO::ATTR_TIMEOUT => 5,
+        ]);
+        $db->exec('PRAGMA journal_mode=WAL');
+        $db->exec('PRAGMA busy_timeout=3000');
+        $db->exec('CREATE TABLE IF NOT EXISTS moves (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            layout TEXT NOT NULL,
+            started_at INTEGER NOT NULL,
+            finished_at INTEGER,
+            status TEXT NOT NULL DEFAULT "running",
+            total INTEGER NOT NULL DEFAULT 0,
+            moved INTEGER NOT NULL DEFAULT 0
+        )');
+        $db->exec('CREATE TABLE IF NOT EXISTS feed_before (
+            move_id INTEGER NOT NULL,
+            feed_id INTEGER NOT NULL,
+            orig_category INTEGER NOT NULL,
+            orig_priority INTEGER NOT NULL,
+            PRIMARY KEY (move_id, feed_id)
+        )');
+        $db->exec('CREATE TABLE IF NOT EXISTS cat_before (
+            move_id INTEGER NOT NULL,
+            cat_id INTEGER NOT NULL,
+            orig_name TEXT NOT NULL,
+            PRIMARY KEY (move_id, cat_id)
+        )');
+        return $db;
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+	/**
+	 * Which categories are out of bounds for a move.
+	 * Uncategorized, anything named "<Site> (direct)", and category 0.
+	 */
+	/**
+	 * Which categories a twin move must never touch.
+	 *
+	 * Inverted on purpose: a category is MANAGED only when it is the shared
+	 * twin category or a "<Site> (pol-ler)" folder. Everything else is
+	 * hand-filed and left alone - Uncategorized, the (direct) folders,
+	 * Celeb/Photos, Celeb/News, News, Comics, Foss, and any category added
+	 * later.
+	 *
+	 * Listing exceptions instead made every new personal category an
+	 * unhandled case: a pol-ler news feed filed under News (UploadVR) was
+	 * dragged into Celebs by the first consolidation.
+	 */
+	private function pollerProtectedCategories(array $catNames, string $singleName = ''): array
 	{
-		$st = $this->settings();
-		$mode = $st['twin_layout'];
-		$catDAO = FreshRSS_Factory::createCategoryDao();
+		$out = [];
+		foreach ($catNames as $id => $n) {
+			$t = trim($n);
+			$isManaged = preg_match('~\(pol-ler\)$~i', $t)
+				|| ($singleName !== '' && strcasecmp($t, $singleName) === 0);
+			if (!$isManaged) { $out[(int)$id] = true; }
+		}
+		return $out;
+	}
+/**
+ * Migrate every managed twin to the current layout.
+ * Reversible in both directions; never deletes a feed or a category.
+ *
+ * @return array{ok:bool,message:string,moved:int,skipped:int,detail:string,journal:int}
+ */
+public function migrateTwinLayout(bool $apply = false): array
+{
+    $st = $this->settings();
+    $mode = $st['twin_layout'];
+    $catDAO = FreshRSS_Factory::createCategoryDao();
+    $feedDAO = FreshRSS_Factory::createFeedDao();
+
+    $catNames = [];
+    foreach ($catDAO->listCategories(false, false) as $c) {
+        $catNames[(int)$c->id()] = (string)$c->name();
+    }
+    $protected = $this->pollerProtectedCategories($catNames, (string)$st['twin_single_name']);
+    $singleName = (string)$st['twin_single_name'];
+
+    $sites = $this->sites();
+    $moves = [];
+    $skipped = 0;
+    foreach ($feedDAO->selectAll() as $f) {
+        $id = (int)($f['id'] ?? 0);
+        $url = (string)($f['url'] ?? '');
+        $cat = (int)($f['category'] ?? 0);
+        if ($id <= 0 || !preg_match('~pol-ler(?::\d+)?/feed/(\d+)~', $url)) { continue; }
+        // Uncategorized and (direct) folders are never touched.
+        if (isset($protected[$cat])) { $skipped++; continue; }
+
+        $target = null;
+        if ($mode === 'single') {
+            $target = $this->twinTarget('');
+        } else {
+            $host = $this->hostForTwinUrl($url, $sites);
+            if ($host === '') { $skipped++; continue; }
+            $target = $this->twinTarget($host);
+        }
+        if ($target['id'] <= 0) { $skipped++; continue; }
+        if ($target['id'] === $cat) { continue; }
+        $moves[] = [
+            'id' => $id, 'name' => (string)($f['name'] ?? ''),
+            'from' => $cat, 'fromName' => (string)($catNames[$cat] ?? ''),
+            'to' => $target['id'], 'toName' => $target['name'],
+            'priority' => (int)($f['priority'] ?? 0),
+        ];
+    }
+
+    $byTo = [];
+    foreach ($moves as $m) { $byTo[$m['toName']] = ($byTo[$m['toName']] ?? 0) + 1; }
+    $detail = [];
+    foreach ($byTo as $n => $c) { $detail[] = $c . ' → ' . $n; }
+
+    $summary = sprintf(
+        '%s: %d twin(s) would move%s%s',
+        $mode === 'single' ? 'single category' : 'per-site split',
+        count($moves),
+        $detail !== [] ? ' (' . implode(', ', $detail) . ')' : '',
+        $skipped > 0 ? ' · ' . $skipped . ' non-twin feed(s) left alone' : ''
+    );
+
+    if (!$apply) {
+        return ['ok' => true, 'message' => $summary . ' — preview only',
+            'moved' => 0, 'skipped' => $skipped, 'detail' => implode('; ', $detail), 'journal' => 0];
+    }
+
+    // Nothing to move is NOT nothing to do. The shared-category rule still has
+    // to be enforced: when the automation files a new twin straight into the
+    // group at priority 10, no feed moves on the next run, and the old early
+    // return left that feed visible inside an otherwise hidden group.
+    if ($moves === []) {
+        $hiddenOnly = $this->applyHiddenToManagedCategories($catNames, $singleName, $protected);
+        return ['ok' => true,
+			'message' => trim($hiddenOnly) !== '' ? ('Nothing to move' . $hiddenOnly) : 'Nothing to move',
+            'moved' => 0, 'skipped' => $skipped, 'detail' => implode('; ', $detail), 'journal' => 0];
+    }
+
+    // ---- journal: remember every position before a single row changes
+    $jdb = $this->pollerJournal();
+    $moveId = 0;
+    if ($jdb !== null) {
+        try {
+            $ins = $jdb->prepare('INSERT INTO moves (layout, started_at, status, total) VALUES (?,?,?,?)');
+            $ins->execute([$mode, time(), 'running', count($moves)]);
+            $moveId = (int)$jdb->lastInsertId();
+            $fb = $jdb->prepare('INSERT OR REPLACE INTO feed_before (move_id, feed_id, orig_category, orig_priority) VALUES (?,?,?,?)');
+            foreach ($moves as $m) { $fb->execute([$moveId, $m['id'], $m['from'], $m['priority']]); }
+        } catch (Throwable $e) { $moveId = 0; }
+    }
+
+    $done = 0;
+    foreach ($moves as $m) {
+        if ($feedDAO->updateFeed((int)$m['id'], ['category' => (int)$m['to']])) { $done++; }
+    }
+
+    // ---- hidden state: the shared category drives every managed category
+    $hiddenNote = $this->applyHiddenToManagedCategories($catNames, $singleName, $protected);
+
+    // Record the per-site twin_cat so runSite() agrees with the rows.
+    $sitesOut = $sites;
+    foreach ($sitesOut as $i => $site) {
+        $t = $this->twinTarget((string)$site['domain']);
+        $sitesOut[$i]['twin_cat'] = (int)$t['id'];
+    }
+    $this->saveAll($sitesOut, $st, $this->bin());
+
+    if ($jdb !== null && $moveId > 0) {
+        try {
+            $jdb->prepare('UPDATE moves SET finished_at=?, status=?, moved=? WHERE id=?')
+                ->execute([time(), 'done', $done, $moveId]);
+        } catch (Throwable $e) { /* journal is best-effort */ }
+    }
+
+    return ['ok' => true,
+        'message' => sprintf('%d twin(s) moved · %s%s', $done, implode(', ', $detail), $hiddenNote),
+        'moved' => $done, 'skipped' => $skipped, 'detail' => implode('; ', $detail),
+        'journal' => $moveId];
+}
+
+/**
+ * Make every managed category follow the shared category's hidden state.
+ *
+ * The shared category (Celebs) is the source of truth: if it is hidden, every
+ * pol-ler category — site folders and person folders alike — is hidden; if it
+ * is shown, they are shown. Uncategorized and (direct) folders are skipped.
+ *
+ * "Hidden" here means priority -10, which is the same value Hidden Categories
+ * uses. This writes through the same feed DAO as the move, so it is subject to
+ * the same Postgres backing.
+ *
+ * @return string a short note for the notification, or ''
+ */
+private function applyHiddenToManagedCategories(array $catNames, string $singleName, array $protected): string
+{
+    $feedDAO = FreshRSS_Factory::createFeedDao();
+    $catDAO = FreshRSS_Factory::createCategoryDao();
+
+    // Find the shared category and read its truth from its own feeds:
+    // majority of -10 means the group is hidden.
+    $sharedId = 0;
+    foreach ($catNames as $id => $n) {
+        if (strcasecmp(trim($n), $singleName) === 0) { $sharedId = (int)$id; break; }
+    }
+    if ($sharedId <= 0) { return ''; }
+
+    $groupHidden = null;
+    foreach ($feedDAO->selectAll() as $f) {
+        if ((int)($f['category'] ?? 0) !== $sharedId) { continue; }
+        $p = (int)($f['priority'] ?? 0);
+        if ($groupHidden === null) { $groupHidden = ($p <= -10); }
+        elseif ($p <= -10) { $groupHidden = true; break; }
+    }
+    if ($groupHidden === null) { return ''; }   // empty group: nothing to follow
+
+    $target = $groupHidden ? -10 : 10;
+    $changed = 0;
+    $catIds = [];
+    foreach ($catNames as $id => $n) {
+        if (isset($protected[$id])) { continue; }
+        $catIds[(int)$id] = $n;
+    }
+    // Managed = the shared category, any "(pol-ler)" folder, or any folder
+    // holding a pol-ler feed. Person folders are covered by the last rule.
+    foreach ($feedDAO->selectAll() as $f) {
+        if (!preg_match('~pol-ler(?::\d+)?/feed/(\d+)~', (string)($f['url'] ?? ''))) { continue; }
+        $cat = (int)($f['category'] ?? 0);
+        if (isset($protected[$cat])) { continue; }
+        if ((int)($f['priority'] ?? 0) !== $target) {
+            if ($feedDAO->updateFeed((int)$f['id'], ['priority' => $target])) { $changed++; }
+        }
+    }
+    return $changed > 0
+        ? sprintf(' · %d feed(s) set to %s', $changed, $groupHidden ? 'hidden' : 'shown')
+        : '';
+}
+	/**
+	 * Undo the most recent move, exactly.
+	 *
+	 * Replays the journal: every feed goes back to the category it came from
+	 * and the priority it had, and any category the move left empty is
+	 * recreated under its old name. Nothing is guessed — the journal is the
+	 * only input, so an undo cannot drift from what the move actually did.
+	 *
+	 * @return array{ok:bool,message:string,restored:int,recreated:int}
+	 */
+	public function undoLastMove(): array
+	{
+		$jdbfile = $this->journalPath();
+		if ($jdbfile === '' || !is_file($jdbfile)) {
+			return ['ok' => false, 'message' => 'No journal yet — nothing has been moved.', 'restored' => 0, 'recreated' => 0];
+		}
+		try {
+			$jdb = new PDO('sqlite:' . $jdbfile, null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_TIMEOUT => 5]);
+			$jdb->exec('PRAGMA busy_timeout=3000');
+		} catch (Throwable $e) {
+			return ['ok' => false, 'message' => 'Journal could not be opened: ' . $e->getMessage(), 'restored' => 0, 'recreated' => 0];
+		}
+
+		$row = $jdb->query("SELECT id, layout, status, moved FROM moves WHERE status='done' ORDER BY id DESC LIMIT 1")->fetch(PDO::FETCH_ASSOC);
+		if (!is_array($row)) {
+			return ['ok' => false, 'message' => 'No finished move to undo.', 'restored' => 0, 'recreated' => 0];
+		}
+		$moveId = (int)$row['id'];
+
 		$feedDAO = FreshRSS_Factory::createFeedDao();
+		$catDAO = FreshRSS_Factory::createCategoryDao();
 
-		// Recognise this extension's pol-ler categories: "<anything> (pol-ler)"
-		// plus the shared name.
-		$pollerCatIds = [];
-		$singleName = (string)$st['twin_single_name'];
-		foreach ($catDAO->listCategories(false, false) as $c) {
-			$n = (string)$c->name();
-			if (preg_match('~\(pol-ler\)$~i', $n) || strcasecmp($n, $singleName) === 0) {
-				$pollerCatIds[(int)$c->id()] = $n;
+		// Categories FIRST. A feed cannot be filed into a category that is not
+		// there yet — Postgres enforces the foreign key and rejects the whole
+		// move, which is exactly what happened when this ran in the wrong order.
+		$recreated = 0;
+		$live = [];
+		foreach ($catDAO->listCategories(false, false) as $c) { $live[strtolower(trim((string)$c->name()))] = (int)$c->id(); }
+		$cs = $jdb->prepare('SELECT cat_id, orig_name FROM cat_before WHERE move_id = ?');
+		$cs->execute([$moveId]);
+		$nameToId = $live;
+		foreach ($cs->fetchAll(PDO::FETCH_ASSOC) as $r) {
+			$name = (string)$r['orig_name'];
+			$key = strtolower(trim($name));
+			if (isset($nameToId[$key])) { continue; }
+			try {
+				$catDAO->addCategory(['name' => $name], true);
+				$recreated++;
+			} catch (Throwable $e) { /* name may clash; skip */ }
+		}
+		foreach ($catDAO->listCategories(false, false) as $c) { $nameToId[strtolower(trim((string)$c->name()))] = (int)$c->id(); }
+
+		// Now the feeds, resolved by NAME so a category recreated with a new id
+		// still receives them.
+		$restored = 0;
+		$failed = 0;
+		$st = $jdb->prepare('SELECT feed_id, orig_category, orig_priority FROM feed_before WHERE move_id = ?');
+		$st->execute([$moveId]);
+		foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) {
+			$fid = (int)$r['feed_id'];
+			$pri = (int)$r['orig_priority'];
+			$cat = (int)$r['orig_category'];
+			// If that id is gone, look the category up by its journalled name.
+			$nameRow = $jdb->prepare('SELECT orig_name FROM cat_before WHERE move_id = ? AND cat_id = ?');
+			$nameRow->execute([$moveId, $cat]);
+			$wanted = (string)($nameRow->fetchColumn() ?: '');
+			if ($wanted !== '') {
+				$resolved = $nameToId[strtolower(trim($wanted))] ?? 0;
+				if ($resolved > 0) { $cat = $resolved; }
 			}
+			try {
+				if ($feedDAO->updateFeed($fid, ['category' => $cat, 'priority' => $pri])) { $restored++; }
+				else { $failed++; }
+			} catch (Throwable $e) { $failed++; }
 		}
-
-		$sites = $this->sites();
-		$moves = [];
-		$skipped = 0;
-		foreach ($feedDAO->selectAll() as $f) {
-			$id = (int)($f['id'] ?? 0);
-			$url = (string)($f['url'] ?? '');
-			$cat = (int)($f['category'] ?? 0);
-			if ($id <= 0 || !preg_match('~pol-ler(?::\d+)?/feed/(\d+)~', $url)) { continue; }
-			if (!isset($pollerCatIds[$cat])) { $skipped++; continue; }
-
-			// Which site does this twin belong to? Match its pol-ler feed id back
-			// to a configured site's template, else fall back to the name prefix.
-			$target = null;
-			if ($mode === 'single') {
-				$target = $this->twinTarget('');
-			} else {
-				$host = $this->hostForTwinUrl($url, $sites);
-				if ($host === '') { $skipped++; continue; }
-				$target = $this->twinTarget($host);
-			}
-			if ($target['id'] <= 0) { $skipped++; continue; }
-			if ($target['id'] === $cat) { continue; }
-			$moves[] = ['id' => $id, 'name' => (string)($f['name'] ?? ''), 'from' => $cat, 'to' => $target['id'], 'toName' => $target['name']];
-		}
-
-		$byTo = [];
-		foreach ($moves as $m) { $byTo[$m['toName']] = ($byTo[$m['toName']] ?? 0) + 1; }
-		$detail = [];
-		foreach ($byTo as $n => $c) { $detail[] = $c . ' → ' . $n; }
-
-		$summary = sprintf(
-			'%s: %d twin(s) would move%s%s',
-			$mode === 'single' ? 'single category' : 'per-site split',
-			count($moves),
-			$detail !== [] ? ' (' . implode(', ', $detail) . ')' : '',
-			$skipped > 0 ? ' · ' . $skipped . ' non-twin feed(s) left alone' : ''
-		);
-
-		if (!$apply || $moves === []) {
-			return ['ok' => true, 'message' => $summary . ($apply ? '' : ' — preview only'),
-				'moved' => 0, 'skipped' => $skipped, 'detail' => implode('; ', $detail)];
-		}
-
-		$done = 0;
-		foreach ($moves as $m) {
-			if ($feedDAO->updateFeed((int)$m['id'], ['category' => (int)$m['to']])) { $done++; }
-		}
-
-		// Record the per-site twin_cat so runSite() agrees with the rows.
-		$sitesOut = $sites;
-		foreach ($sitesOut as $i => $site) {
-			$t = $this->twinTarget((string)$site['domain']);
-			$sitesOut[$i]['twin_cat'] = (int)$t['id'];
-		}
-		$this->saveAll($sitesOut, $st, $this->bin());
+		$jdb->prepare("UPDATE moves SET status='undone' WHERE id=?")->execute([$moveId]);
 
 		return ['ok' => true,
-			'message' => sprintf('%d twin(s) moved · %s', $done, implode(', ', $detail)),
-			'moved' => $done, 'skipped' => $skipped, 'detail' => implode('; ', $detail)];
+			'message' => sprintf('Undone move %d: %d feed(s) put back, %d category(ies) recreated.', $moveId, $restored, $recreated),
+			'restored' => $restored, 'recreated' => $recreated];
 	}
 
+	/** Where the move journal lives (CrossSite's state dir, so it survives extension renames). */
+	private function journalPath(): string
+	{
+		$user = defined('ADD_USER') ? ADD_USER : '';
+		if ($user === '') {
+			foreach ((array)@scandir(DATA_PATH . '/users') ?: [] as $n) {
+				if ($n === '.' || $n === '..' || $n === '_') { continue; }
+				if (is_dir(DATA_PATH . '/users/' . $n)) { $user = $n; break; }
+			}
+		}
+		if ($user === '') { return ''; }
+		return DATA_PATH . '/users/' . $user . '/extensions/CrossSite/state.sqlite';
+	}
 	/** Which configured site a pol-ler twin URL belongs to, from its name. */
 	private function hostForTwinUrl(string $url, array $sites): string
 	{
@@ -1603,15 +1879,29 @@ class PollerSitesExtension extends Minz_Extension
 		//
 		// The template feed is excluded ONLY when it is not already sitting in this
 		// site's twin category. A template subscribed into the twin category IS
-		// that profile's twin for its own page (the template feed is one person
-		// Qualley and belongs in cat 11) — excluding it unconditionally created a
-		// duplicate subscription on the same URL.
+		// that profile's twin for the profile's own page, so excluding it
+		// unconditionally created a duplicate subscription on the same URL.
+		// One entry per pol-ler feed id, and the FIRST one wins.
+		//
+		// This used to be a plain "$twinByPid[$pid] = $f", which silently kept
+		// only the last subscription when a feed id appeared more than once.
+		// The run then could not tell that the earlier rows were duplicates and
+		// addFeed() happily created another one on the next poll, so a single
+		// feed could accumulate many subscriptions over time.
+		//
+		// Keeping the lowest id is deliberate: it is the subscription whose
+		// entry history is longest, so it is the one worth keeping.
 		$twinByPid = [];
+		$twinDupes = [];
 		foreach ($all as $f) {
 			$u = (string)($f['url'] ?? '');
 			if (preg_match('~pol-ler(?::\d+)?/feed/(\d+)~', $u, $m)) {
 				$pid = (int)$m[1];
 				if ($pid === (int)$site['template'] && (int)($f['category'] ?? 0) !== (int)$site['twin_cat']) {
+					continue;
+				}
+				if (isset($twinByPid[$pid])) {
+					$twinDupes[$pid] = ($twinDupes[$pid] ?? 1) + 1;
 					continue;
 				}
 				$twinByPid[$pid] = $f;
@@ -1693,11 +1983,47 @@ class PollerSitesExtension extends Minz_Extension
 				$wantUrl = $this->twinUrl($pid);
 				$fix = [];
 				if ((string)($twin['name'] ?? '') !== $name) { $fix['name'] = $name; }
-				if ((int)($twin['category'] ?? 0) !== (int)$site['twin_cat']) { $fix['category'] = (int)$site['twin_cat']; }
+				// LEAVE DELIBERATE FILING ALONE.
+				//
+				// Correct the category only when the feed is sitting in a
+				// category this extension itself manages (any "(pol-ler)" or
+				// "(direct)" folder). That is a genuine mis-file worth fixing.
+				//
+				// A feed in any OTHER category was put there on purpose — a
+				// per-person category, for example — and re-filing it undid
+				// that on every poll. Repairing the name and url is the real
+				// job here; moving a deliberately filed feed never was.
+				$curCat = (int)($twin['category'] ?? 0);
+				if ($curCat !== (int)$site['twin_cat']) {
+					$curName = '';
+					foreach ($catDAO->listCategories(false, false) as $c) {
+						if ((int)$c->id() === $curCat) { $curName = (string)$c->name(); break; }
+					}
+					$ours = (bool)preg_match('~\((pol-ler|direct)\)$~i', $curName);
+					if ($ours) { $fix['category'] = (int)$site['twin_cat']; }
+				}
 				if ((string)($twin['url'] ?? '') !== $wantUrl) { $fix['url'] = $wantUrl; }
 				if ($fix !== []) { $feedDAO->updateFeed((int)$twin['id'], $fix); }
 				$twinId = (int)$twin['id'];
 			} else {
+				// Last line of defence. If this exact URL is already subscribed,
+				// adopt that row instead of adding a second one. Two runs can
+				// otherwise both decide a twin is missing — the cron and a page
+				// load — and both subscribe it.
+				$guardUrl = $this->twinUrl($pid);
+				$guardRow = null;
+				foreach ($feedDAO->selectAll() as $gchk) {
+					if ((string)($gchk['url'] ?? '') === $guardUrl) { $guardRow = $gchk; break; }
+				}
+				if ($guardRow !== null) {
+					$twinId = (int)$guardRow['id'];
+					$existing++;
+					$twinByPid[$pid] = [
+						'id' => $twinId,
+						'name' => (string)($guardRow['name'] ?? $name),
+						'category' => (int)($guardRow['category'] ?? $site['twin_cat']),
+					];
+				} else {
 				$added = $feedDAO->addFeed([
 					'url' => $this->twinUrl($pid),
 					'kind' => 0,
@@ -1718,6 +2044,7 @@ class PollerSitesExtension extends Minz_Extension
 					continue;
 				}
 			}
+				}
 
 			// only file the direct feed once its twin exists, so a failure never
 			// leaves an empty slot and no readable original
