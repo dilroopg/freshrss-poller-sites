@@ -42,6 +42,12 @@ All notable changes to this extension. Versions follow the `version` field in
   row instead of creating a second.
 - Moving a template feed into the twin category of its own site no longer
   produces a duplicate subscription on the same URL.
+- **New twins were subscribed visible inside a hidden group.** The subscribe
+  path left the priority at the add-feed default, so a person added between
+  layout runs appeared as the only visible feed in a hidden category — very
+  obvious in a phone app. The priority is now decided from the target category
+  at subscribe time, using the same rule as the layout sync: a hidden category
+  means -10, an empty one means 10.
 
 ## 1.0.0
 

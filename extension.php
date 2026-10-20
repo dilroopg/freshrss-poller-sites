@@ -682,6 +682,32 @@ class PollerSitesExtension extends Minz_Extension
 		}
 		return $out;
 	}
+	/**
+	 * Priority a feed should have on entering a category.
+	 *
+	 * Mirrors applyHiddenToManagedCategories(): the shared category decides the
+	 * group state, and any hidden feed in it makes the group hidden. Avoids the
+	 * circular reading where one stray visible feed makes a hidden group look
+	 * visible.
+	 *
+	 * For any other category the feeds already in it decide, but an empty
+	 * category is treated as visible rather than hidden.
+	 */
+	private function priorityForCategory(int $categoryId, int $sharedId = 0): int
+	{
+		$feedDAO = FreshRSS_Factory::createFeedDao();
+		$total = 0;
+		$anyHidden = false;
+		foreach ($feedDAO->selectAll() as $f) {
+			if ((int)($f['category'] ?? 0) !== $categoryId) { continue; }
+			$total++;
+			if ((int)($f['priority'] ?? 0) <= -10) { $anyHidden = true; }
+		}
+		if ($total === 0) { return 10; }        // empty: visible, never force hidden
+		if ($categoryId === $sharedId) { return $anyHidden ? -10 : 10; }
+		return $anyHidden ? -10 : 10;
+	}
+
 /**
  * Migrate every managed twin to the current layout.
  * Reversible in both directions; never deletes a feed or a category.
@@ -2028,6 +2054,7 @@ private function applyHiddenToManagedCategories(array $catNames, string $singleN
 					'url' => $this->twinUrl($pid),
 					'kind' => 0,
 					'category' => (int)$site['twin_cat'],
+					'priority' => $this->priorityForCategory((int)$site['twin_cat']),
 					'name' => $name,
 					'website' => 'https://' . $domain . '/',
 					'description' => 'pol-ler scrape of ' . $scrape,
